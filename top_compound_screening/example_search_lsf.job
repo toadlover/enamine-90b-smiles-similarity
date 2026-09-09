@@ -1,0 +1,78 @@
+#!/bin/bash
+
+#BSUB -J enamine_similarity
+#BSUB -q short
+#BSUB -W 8:00
+#BSUB -n 64
+#BSUB -R "span[hosts=1]"
+#BSUB -oo logs/enamine_similarity_%J.out
+#BSUB -eo logs/enamine_similarity_%J.err
+
+set -euo pipefail
+
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
+#path to full library
+ROOT="/pi/summer.thyme-umw/enamine_90b_library/S"
+#path to searching script
+SCRIPT="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/search_enamine_similarity.py"
+
+
+QUERY_SMILES='CC1=CC=CC=C1NC(=O)NCC2CCCCC2'
+
+#number of top hits to keep, i.e 1 million, 10 million etc
+TOP_K=1000000
+#number of parallel search workers; keep as same number as -n flag in job!
+WORKERS=64
+#size of batches that each worker will process at a time, likely just keep at 100k
+BATCH_SIZE=100000
+
+#working scratch space for running oeprations
+WORK_DIR="/pi/summer.thyme-umw/enamine_90b_library/initial_screen_test_S"
+#outptu file in tsv (tab separated) format
+OUTPUT="/pi/summer.thyme-umw/enamine_90b_library/initial_screen_test_S/query_01_top1m.tsv"
+
+# ------------------------------------------------------------
+# Environment
+# ------------------------------------------------------------
+
+# Example:
+# source ~/miniconda3/etc/profile.d/conda.sh
+# conda activate rdkit
+
+mkdir -p logs
+mkdir -p "$WORK_DIR"
+mkdir -p "$(dirname "$OUTPUT")"
+
+echo "============================================================"
+echo "Enamine similarity search"
+echo "============================================================"
+echo "Job ID:       ${LSB_JOBID}"
+echo "Host:         $(hostname)"
+echo "Allocated CPU cores: ${LSB_DJOB_NUMPROC:-unknown}"
+echo
+echo "Root:         $ROOT"
+echo "Query:        $QUERY_SMILES"
+echo "Top K:        $TOP_K"
+echo "Workers:      $WORKERS"
+echo "Batch size:   $BATCH_SIZE"
+echo "Work dir:     $WORK_DIR"
+echo "Output:       $OUTPUT"
+echo "============================================================"
+
+python "$SCRIPT" \
+    "$ROOT" \
+    "$QUERY_SMILES" \
+    --top-k "$TOP_K" \
+    --workers "$WORKERS" \
+    --batch-size "$BATCH_SIZE" \
+    --work-dir "$WORK_DIR" \
+    --output "$OUTPUT"
+
+echo
+echo "============================================================"
+echo "Similarity search completed successfully."
+echo "Output: $OUTPUT"
+echo "============================================================"
