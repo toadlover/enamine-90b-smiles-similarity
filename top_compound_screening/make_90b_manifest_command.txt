@@ -1,0 +1,1 @@
+find /pi/summer.thyme-umw/enamine_90b_library/M /pi/summer.thyme-umw/enamine_90b_library/S -type f -name '*.cxsmiles.bz2' | sort > enamine_90b_manifest.txt
