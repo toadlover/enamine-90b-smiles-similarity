@@ -6,8 +6,8 @@
 #BSUB -n 8
 #BSUB -R "span[hosts=1]"
 #BSUB -R "rusage[mem=16000]"
-#BSUB -oo /path/to/logs/similarity_%I.out
-#BSUB -eo /path/to/logs/similarity_%I.err
+#BSUB -oo /pi/summer.thyme-umw/enamine_90b_library/full_library_test/logs/similarity_%I.out
+#BSUB -eo /pi/summer.thyme-umw/enamine_90b_library/full_library_test/logs/similarity_%I.err
 
 set -euo pipefail
 
@@ -16,11 +16,11 @@ set -euo pipefail
 # Configuration
 # ============================================================
 
-MANIFEST="/path/to/enamine_90b_manifest.txt"
+MANIFEST="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/enamine_90b_manifest.txt"
 
-SCRIPT="/path/to/search_enamine_similarity_worker.py"
+SCRIPT="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/search_enamine_similarity_worker.py"
 
-QUERY_SMILES='YOUR_REFERENCE_SMILES_HERE'
+QUERY_SMILES='c1(cc2COCC(=O)Nc2cc1)c1cccc2c1cn[nH]2'
 
 TOP_K=1000000
 
@@ -34,12 +34,32 @@ BATCH_SIZE=50000
 # Persistent output.
 #
 # These files MUST survive after an LSF job ends.
-RESULT_DIR="/path/to/similarity_results/query_01/shards"
+RESULT_DIR="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/similarity_results/query_01/shards"
 
 
 # Temporary node-local work.
-WORK_DIR="/scratch/${USER}/enamine_similarity_${LSB_JOBID}"
+#WORK_DIR="/scratch/${USER}/enamine_similarity_${LSB_JOBID}"
+#test print of the job index
+echo "LSB_JOBINDEX=$LSB_JOBINDEX"
 
+###############################################################################
+# CONFIGURATION
+###############################################################################
+
+SCRATCH_SIZE_GB="${SCRATCH_SIZE_GB:-10}"
+
+
+###############################################################################
+# DETERMINE SCRATCH DIRECTORY
+###############################################################################
+
+if [ -z "${WORK_DIR:-}" ]; then
+    if [ -n "${LSB_JOBINDEX:-}" ]; then
+        WORK_DIR="/tmp/${USER}/${LSB_JOBID}_${LSB_JOBINDEX}.scratch"
+    else
+        WORK_DIR="/tmp/${USER}/${LSB_JOBID}.scratch"
+    fi
+fi
 
 # ============================================================
 # Environment
