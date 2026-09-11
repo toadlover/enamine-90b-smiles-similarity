@@ -11,11 +11,29 @@ Each invocation:
     1. Reads a global manifest of cxsmiles.bz2 files.
     2. Selects one contiguous shard based on task index/task count.
     3. Processes multiple archives concurrently with multiprocessing.
-    4. Each archive retains its local top-K.
-    5. The parent merges archive results into the exact shard top-K.
-    6. Writes one shard_XXXXX.npz file for later global merging.
+    4. Optionally discards compounds below --min-tanimoto BEFORE
+       they enter the top-K candidate machinery.
+    5. Each archive retains up to its local top-K.
+    6. The parent merges archive results into the exact shard top-K.
+    7. Writes one shard_XXXXX.npz file for later global merging.
 
-Designed for use as an LSF job array.
+IMPORTANT:
+    --min-tanimoto does NOT avoid:
+        * bz2 decompression
+        * SMILES parsing
+        * molecule construction
+        * Morgan fingerprint generation
+        * Tanimoto calculation
+
+    The similarity must first be calculated to determine whether
+    a compound passes the threshold.
+
+    It DOES reduce:
+        * candidates entering top-K maintenance
+        * NumPy concatenation/partition work
+        * local result sizes
+        * shard merge work
+        * disk usage for intermediate/final shard files
 
 The actual ligand records are NOT retained here; only:
 
@@ -56,6 +74,7 @@ FP_GENERATOR = None
 TOP_K = None
 BATCH_SIZE = None
 HEADER_LINES = None
+MIN_TANIMOTO = None
 
 
 # ============================================================
@@ -70,6 +89,7 @@ def init_worker(
     radius,
     fp_size,
     use_chirality,
+    min_tanimoto,
 ):
     """
     Initialize RDKit objects once per multiprocessing worker.
@@ -80,6 +100,7 @@ def init_worker(
     global TOP_K
     global BATCH_SIZE
     global HEADER_LINES
+    global MIN_TANIMOTO
 
     query_mol = Chem.MolFromSmiles(query_smiles)
 
@@ -99,6 +120,7 @@ def init_worker(
     TOP_K = top_k
     BATCH_SIZE = batch_size
     HEADER_LINES = header_lines
+    MIN_TANIMOTO = min_tanimoto
 
 
 # ============================================================
@@ -125,7 +147,7 @@ def get_task_slice(n_items, task_index, task_count):
     Divide N archives into task_count contiguous, approximately
     equal-sized groups.
 
-    task_index is 1-based, matching LSF_JOBINDEX.
+    task_index is 1-based, matching LSB_JOBINDEX.
     """
 
     if task_index < 1 or task_index > task_count:
@@ -169,7 +191,10 @@ def update_archive_top_k(
     k,
 ):
     """
-    Incorporate one batch into an archive's running top-K.
+    Incorporate candidate scores into an archive's running top-K.
+
+    At this point, new_scores have ALREADY passed any global
+    --min-tanimoto threshold.
     """
 
     if new_scores.size == 0:
@@ -182,11 +207,17 @@ def update_archive_top_k(
     if top_scores.size < k:
 
         combined_scores = np.concatenate(
-            (top_scores, new_scores)
+            (
+                top_scores,
+                new_scores,
+            )
         )
 
         combined_lines = np.concatenate(
-            (top_lines, new_lines)
+            (
+                top_lines,
+                new_lines,
+            )
         )
 
         return reduce_top_k(
@@ -196,16 +227,17 @@ def update_archive_top_k(
         )
 
     # --------------------------------------------------------
-    # Once full, discard candidates definitely below the
-    # existing minimum.
+    # Once K entries exist, we also have a dynamic top-K
+    # threshold. Anything below it cannot enter this archive's
+    # current top-K.
     #
-    # Keep equality here because tied cutoff values are still
-    # legitimate top-K candidates.
+    # Keep equality so ties at the boundary remain legitimate
+    # candidates.
     # --------------------------------------------------------
 
-    threshold = top_scores.min()
+    dynamic_threshold = top_scores.min()
 
-    mask = new_scores >= threshold
+    mask = new_scores >= dynamic_threshold
 
     if not np.any(mask):
         return top_scores, top_lines
@@ -243,7 +275,14 @@ def process_batch(
 ):
     """
     Parse a batch of SMILES, generate Morgan fingerprints,
-    and perform a batched Tanimoto calculation.
+    perform batched Tanimoto calculation, optionally apply the
+    global minimum similarity cutoff, then update local top-K.
+
+    Returns:
+        updated top_scores
+        updated top_lines
+        number of valid RDKit molecules
+        number passing --min-tanimoto
     """
 
     fps = []
@@ -269,26 +308,63 @@ def process_batch(
             top_scores,
             top_lines,
             0,
+            0,
         )
+
+    # --------------------------------------------------------
+    # Batched exact Tanimoto calculation
+    # --------------------------------------------------------
 
     similarities = DataStructs.BulkTanimotoSimilarity(
         QUERY_FP,
         fps,
     )
 
-    # Use float64 so ranking is not unnecessarily reduced
-    # to float32 precision.
     scores = np.asarray(
         similarities,
         dtype=np.float64,
     )
 
-    # Split archives contain <= 10M ligands, so uint32 is
-    # comfortably sufficient.
     lines = np.asarray(
         valid_lines,
         dtype=np.uint32,
     )
+
+    valid_count = scores.size
+
+    # --------------------------------------------------------
+    # NEW:
+    # Apply user-provided absolute Tanimoto threshold BEFORE
+    # anything enters the top-K machinery.
+    # --------------------------------------------------------
+
+    if MIN_TANIMOTO is not None:
+
+        cutoff_mask = scores >= MIN_TANIMOTO
+
+        passing_count = int(
+            np.count_nonzero(cutoff_mask)
+        )
+
+        if passing_count == 0:
+
+            return (
+                top_scores,
+                top_lines,
+                valid_count,
+                0,
+            )
+
+        scores = scores[cutoff_mask]
+        lines = lines[cutoff_mask]
+
+    else:
+
+        passing_count = valid_count
+
+    # --------------------------------------------------------
+    # Only qualifying candidates reach top-K maintenance.
+    # --------------------------------------------------------
 
     top_scores, top_lines = update_archive_top_k(
         top_scores,
@@ -301,7 +377,8 @@ def process_batch(
     return (
         top_scores,
         top_lines,
-        len(fps),
+        valid_count,
+        passing_count,
     )
 
 
@@ -345,6 +422,7 @@ def process_archive(task):
 
     total_records = 0
     valid_records = 0
+    passing_cutoff = 0
 
     print(
         f"[START] archive_index={archive_global_index} "
@@ -383,14 +461,17 @@ def process_archive(task):
             if not fields:
                 continue
 
-            # Base SMILES is always the first token.
+            # ------------------------------------------------
+            # The base SMILES is always the first whitespace
+            # token in the Enamine CXSMILES table.
             #
-            # Any CXSMILES information such as:
+            # Example:
             #
-            #     |&1:11,14|
+            # CC... |&1:11,14| s_2430... 334.441 ...
             #
-            # occurs afterward and is not required for
-            # fingerprinting.
+            # fields[0] is the normal SMILES used by RDKit.
+            # ------------------------------------------------
+
             smiles = fields[0]
 
             smiles_batch.append(smiles)
@@ -402,6 +483,7 @@ def process_archive(task):
                     top_scores,
                     top_lines,
                     n_valid,
+                    n_passing,
                 ) = process_batch(
                     smiles_batch,
                     line_batch,
@@ -410,17 +492,34 @@ def process_archive(task):
                 )
 
                 valid_records += n_valid
+                passing_cutoff += n_passing
 
                 smiles_batch.clear()
                 line_batch.clear()
 
                 if total_records % 1_000_000 < BATCH_SIZE:
-                    print(
-                        f"[PROGRESS] "
-                        f"{archive_path.name}: "
-                        f"{total_records:,} records",
-                        flush=True,
-                    )
+
+                    if MIN_TANIMOTO is None:
+
+                        print(
+                            f"[PROGRESS] "
+                            f"{archive_path.name}: "
+                            f"{total_records:,} records; "
+                            f"{valid_records:,} valid",
+                            flush=True,
+                        )
+
+                    else:
+
+                        print(
+                            f"[PROGRESS] "
+                            f"{archive_path.name}: "
+                            f"{total_records:,} records; "
+                            f"{valid_records:,} valid; "
+                            f"{passing_cutoff:,} >= "
+                            f"{MIN_TANIMOTO:.3f}",
+                            flush=True,
+                        )
 
         # ----------------------------------------------------
         # Final partial batch
@@ -432,6 +531,7 @@ def process_archive(task):
                 top_scores,
                 top_lines,
                 n_valid,
+                n_passing,
             ) = process_batch(
                 smiles_batch,
                 line_batch,
@@ -440,6 +540,7 @@ def process_archive(task):
             )
 
             valid_records += n_valid
+            passing_cutoff += n_passing
 
     # --------------------------------------------------------
     # Sort archive result descending.
@@ -485,10 +586,24 @@ def process_archive(task):
         else 0.0
     )
 
+    if MIN_TANIMOTO is None:
+
+        cutoff_text = (
+            f"{passing_cutoff:,} eligible"
+        )
+
+    else:
+
+        cutoff_text = (
+            f"{passing_cutoff:,} >= "
+            f"{MIN_TANIMOTO:.3f}"
+        )
+
     print(
         f"[DONE] {archive_path.name}: "
         f"{total_records:,} records; "
         f"{valid_records:,} valid; "
+        f"{cutoff_text}; "
         f"{top_scores.size:,} retained; "
         f"{elapsed:.1f} sec; "
         f"{rate:,.0f} ligands/sec",
@@ -501,6 +616,7 @@ def process_archive(task):
         "result": str(result_path),
         "records": int(total_records),
         "valid": int(valid_records),
+        "passing_cutoff": int(passing_cutoff),
         "retained": int(top_scores.size),
         "elapsed": float(elapsed),
     }
@@ -517,6 +633,9 @@ def merge_archive_results(
     """
     Merge all archives belonging to THIS LSF array element
     into one exact shard top-K.
+
+    All candidates in these files have already passed the
+    absolute --min-tanimoto cutoff, if one was specified.
     """
 
     shard_scores = np.empty(
@@ -551,6 +670,18 @@ def merge_archive_results(
                 dtype=np.uint32,
             )
 
+        # No candidates passed this archive's cutoff.
+        if scores.size == 0:
+
+            print(
+                f"[SHARD MERGE] "
+                f"{counter}/{len(results)} "
+                f"archive had no qualifying candidates",
+                flush=True,
+            )
+
+            continue
+
         archive_indices = np.full(
             scores.size,
             result["archive_index"],
@@ -558,7 +689,8 @@ def merge_archive_results(
         )
 
         # ----------------------------------------------------
-        # Filter against current shard threshold where possible.
+        # If shard top-K is already full, apply its dynamic
+        # threshold too.
         # ----------------------------------------------------
 
         if shard_scores.size >= top_k:
@@ -608,7 +740,7 @@ def merge_archive_results(
         )
 
         # ----------------------------------------------------
-        # Reduce to top K.
+        # Reduce to top K only if necessary.
         # ----------------------------------------------------
 
         if shard_scores.size > top_k:
@@ -679,7 +811,23 @@ def main():
         "--top-k",
         type=int,
         default=1_000_000,
-        help="Number of shard hits to retain.",
+        help=(
+            "Maximum number of shard hits to retain. "
+            "If --min-tanimoto produces fewer qualifying "
+            "compounds, fewer than top-k will be retained."
+        ),
+    )
+
+    parser.add_argument(
+        "--min-tanimoto",
+        type=float,
+        default=None,
+        help=(
+            "Optional minimum Tanimoto similarity required "
+            "for a ligand to enter the candidate/top-K set. "
+            "Example: --min-tanimoto 0.6. "
+            "Default: no absolute cutoff."
+        ),
     )
 
     parser.add_argument(
@@ -773,6 +921,36 @@ def main():
     args = parser.parse_args()
 
     # --------------------------------------------------------
+    # Sanity checks
+    # --------------------------------------------------------
+
+    if args.top_k < 1:
+        raise ValueError(
+            "--top-k must be at least 1."
+        )
+
+    if args.batch_size < 1:
+        raise ValueError(
+            "--batch-size must be at least 1."
+        )
+
+    if args.workers < 1:
+        raise ValueError(
+            "--workers must be at least 1."
+        )
+
+    if (
+        args.min_tanimoto is not None
+        and not (
+            0.0 <= args.min_tanimoto <= 1.0
+        )
+    ):
+        raise ValueError(
+            "--min-tanimoto must be between "
+            "0.0 and 1.0."
+        )
+
+    # --------------------------------------------------------
     # Resolve task index.
     # --------------------------------------------------------
 
@@ -801,7 +979,10 @@ def main():
         args.manifest
     ).resolve()
 
-    with open(manifest_path, "r") as handle:
+    with open(
+        manifest_path,
+        "r",
+    ) as handle:
 
         archives = [
             line.strip()
@@ -811,7 +992,8 @@ def main():
 
     if not archives:
         raise RuntimeError(
-            f"Manifest is empty: {manifest_path}"
+            f"Manifest is empty: "
+            f"{manifest_path}"
         )
 
     manifest_hash = manifest_sha256(
@@ -832,9 +1014,20 @@ def main():
 
     if not selected:
         raise RuntimeError(
-            f"Task {task_index}/{args.task_count} "
+            f"Task {task_index}/"
+            f"{args.task_count} "
             f"received no archives."
         )
+
+    # --------------------------------------------------------
+    # Search summary
+    # --------------------------------------------------------
+
+    cutoff_display = (
+        "none"
+        if args.min_tanimoto is None
+        else f"{args.min_tanimoto:.3f}"
+    )
 
     print(
         "============================================================",
@@ -854,7 +1047,8 @@ def main():
         flush=True,
     )
     print(
-        f"Global indexes:   {start} through {end - 1}",
+        f"Global indexes:   "
+        f"{start} through {end - 1}",
         flush=True,
     )
     print(
@@ -866,7 +1060,25 @@ def main():
         flush=True,
     )
     print(
-        f"Batch size:       {args.batch_size:,}",
+        f"Min Tanimoto:     {cutoff_display}",
+        flush=True,
+    )
+    print(
+        f"Batch size:       "
+        f"{args.batch_size:,}",
+        flush=True,
+    )
+    print(
+        f"Morgan radius:    {args.radius}",
+        flush=True,
+    )
+    print(
+        f"Fingerprint bits: {args.fp_size}",
+        flush=True,
+    )
+    print(
+        f"Use chirality:    "
+        f"{args.use_chirality}",
         flush=True,
     )
     print(
@@ -919,7 +1131,8 @@ def main():
 
         result_path = (
             archive_work
-            / f"archive_{global_index:08d}.npz"
+            / f"archive_"
+              f"{global_index:08d}.npz"
         )
 
         tasks.append(
@@ -949,6 +1162,7 @@ def main():
             args.radius,
             args.fp_size,
             args.use_chirality,
+            args.min_tanimoto,
         ),
     ) as executor:
 
@@ -964,10 +1178,14 @@ def main():
             future_map
         ):
 
-            task = future_map[future]
+            task = future_map[
+                future
+            ]
 
             try:
-                result = future.result()
+                result = (
+                    future.result()
+                )
 
             except Exception as exc:
 
@@ -981,7 +1199,9 @@ def main():
 
                 raise
 
-            completed.append(result)
+            completed.append(
+                result
+            )
 
     # --------------------------------------------------------
     # Merge task-local results.
@@ -991,6 +1211,21 @@ def main():
         key=lambda x: x[
             "archive_index"
         ]
+    )
+
+    total_records = sum(
+        result["records"]
+        for result in completed
+    )
+
+    total_valid = sum(
+        result["valid"]
+        for result in completed
+    )
+
+    total_passing = sum(
+        result["passing_cutoff"]
+        for result in completed
     )
 
     print(
@@ -1014,11 +1249,13 @@ def main():
 
     shard_path = (
         output_dir
-        / f"shard_{task_index:05d}.npz"
+        / f"shard_"
+          f"{task_index:05d}.npz"
     )
 
     shard_temp = Path(
-        str(shard_path) + ".tmp.npz"
+        str(shard_path)
+        + ".tmp.npz"
     )
 
     np.savez(
@@ -1035,42 +1272,76 @@ def main():
 
     # --------------------------------------------------------
     # Metadata allows the final merger to catch accidental
-    # mixing of different searches.
+    # mixing of different searches/settings.
     # --------------------------------------------------------
+
+    elapsed = (
+        time.time()
+        - overall_start
+    )
 
     metadata = {
         "task_index": task_index,
         "task_count": args.task_count,
-        "manifest": str(manifest_path),
-        "manifest_sha256": manifest_hash,
-        "manifest_archive_count": len(archives),
+        "manifest": str(
+            manifest_path
+        ),
+        "manifest_sha256": (
+            manifest_hash
+        ),
+        "manifest_archive_count": (
+            len(archives)
+        ),
         "slice_start": start,
         "slice_end": end,
-        "archive_count": len(selected),
-        "query_smiles": args.query_smiles,
+        "archive_count": len(
+            selected
+        ),
+        "query_smiles": (
+            args.query_smiles
+        ),
         "top_k": args.top_k,
+        "min_tanimoto": (
+            args.min_tanimoto
+        ),
         "radius": args.radius,
         "fp_size": args.fp_size,
-        "use_chirality": args.use_chirality,
-        "batch_size": args.batch_size,
-        "header_lines": args.header_lines,
+        "use_chirality": (
+            args.use_chirality
+        ),
+        "batch_size": (
+            args.batch_size
+        ),
+        "header_lines": (
+            args.header_lines
+        ),
         "workers": args.workers,
+        "total_records": (
+            total_records
+        ),
+        "valid_records": (
+            total_valid
+        ),
+        "passing_cutoff": (
+            total_passing
+        ),
         "retained": int(
             shard_scores.size
         ),
         "elapsed_seconds": (
-            time.time()
-            - overall_start
+            elapsed
         ),
     }
 
     metadata_path = (
         output_dir
-        / f"shard_{task_index:05d}.json"
+        / f"shard_"
+          f"{task_index:05d}.json"
     )
 
     metadata_temp = Path(
-        str(metadata_path) + ".tmp"
+        str(metadata_path)
+        + ".tmp"
     )
 
     with open(
@@ -1100,10 +1371,9 @@ def main():
             ignore_errors=True,
         )
 
-    elapsed = (
-        time.time()
-        - overall_start
-    )
+    # --------------------------------------------------------
+    # Final task summary
+    # --------------------------------------------------------
 
     print(
         "============================================================",
@@ -1111,19 +1381,70 @@ def main():
     )
     print(
         f"[SUCCESS] Task "
-        f"{task_index}/{args.task_count} complete",
+        f"{task_index}/"
+        f"{args.task_count} complete",
         flush=True,
     )
     print(
-        f"Shard result: {shard_path}",
+        f"Archives:       "
+        f"{len(selected):,}",
         flush=True,
     )
     print(
-        f"Retained:     {shard_scores.size:,}",
+        f"Total records:  "
+        f"{total_records:,}",
         flush=True,
     )
     print(
-        f"Elapsed:      {elapsed / 3600:.2f} hours",
+        f"Valid ligands:  "
+        f"{total_valid:,}",
+        flush=True,
+    )
+
+    if args.min_tanimoto is not None:
+
+        fraction = (
+            100.0
+            * total_passing
+            / total_valid
+            if total_valid
+            else 0.0
+        )
+
+        print(
+            f"Passing >= "
+            f"{args.min_tanimoto:.3f}: "
+            f"{total_passing:,} "
+            f"({fraction:.6f}%)",
+            flush=True,
+        )
+
+    print(
+        f"Shard retained: "
+        f"{shard_scores.size:,}",
+        flush=True,
+    )
+    print(
+        f"Shard result:   "
+        f"{shard_path}",
+        flush=True,
+    )
+    print(
+        f"Elapsed:        "
+        f"{elapsed / 3600:.2f} hours",
+        flush=True,
+    )
+
+    overall_rate = (
+        total_records / elapsed
+        if elapsed > 0
+        else 0.0
+    )
+
+    print(
+        f"Overall rate:   "
+        f"{overall_rate:,.0f} "
+        f"ligands/sec",
         flush=True,
     )
     print(
