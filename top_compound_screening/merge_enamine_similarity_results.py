@@ -731,6 +731,7 @@ def load_and_verify_metadata(
         "manifest_archive_count",
         "query_smiles",
         "top_k",
+        "min_tanimoto",
         "radius",
         "fp_size",
         "use_chirality",
