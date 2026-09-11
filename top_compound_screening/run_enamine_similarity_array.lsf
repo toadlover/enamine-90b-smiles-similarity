@@ -89,11 +89,12 @@ echo "Top K:           ${TOP_K}"
 echo "Batch size:      ${BATCH_SIZE}"
 echo "============================================================"
 
-
+#for now, using hard-coded min tanimoto of 0.6
 python "$SCRIPT" \
     --manifest "$MANIFEST" \
     --query-smiles "$QUERY_SMILES" \
     --top-k "$TOP_K" \
+    --min-tanimoto 0.6 \
     --task-count "$TASK_COUNT" \
     --workers "$WORKERS" \
     --batch-size "$BATCH_SIZE" \
