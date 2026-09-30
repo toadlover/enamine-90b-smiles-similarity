@@ -1,0 +1,38 @@
+#example job that was used to make the split bz2 files for the S portion of the library
+#BSUB -J "split_enamine[1-2675]%300"
+#BSUB -q long
+#BSUB -W 48:00
+#BSUB -n 1
+#BSUB -R "rusage[mem=4000]"
+#BSUB -oo logs/split_enamine_%I.out
+#BSUB -eo logs/split_enamine_%I.err
+
+
+set -euo pipefail
+
+
+MANIFEST="/pi/summer.thyme-umw/enamine_90b_library/M_part1/M_cxsmiles_manifest.txt"
+SCRIPT="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/split_bz2/split_enamine_cxsmiles.py"
+
+
+INPUT_FILE=$(sed -n "${LSB_JOBINDEX}p" "$MANIFEST")
+
+
+
+if [[ -z "$INPUT_FILE" ]]; then
+    echo "ERROR: No file found for LSF index ${LSB_JOBINDEX}"
+    exit 1
+fi
+
+
+
+echo "LSF job index: ${LSB_JOBINDEX}"
+echo "Processing: $INPUT_FILE"
+
+
+
+python "$SCRIPT" \
+    "$INPUT_FILE" \
+    --chunk-size 10000000 \
+    --header-lines 1 \
+    --delete-original
