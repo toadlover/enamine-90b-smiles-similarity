@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#BSUB -J "enamine_sim[1-64]%32"
+#BSUB -J "enamine_sim[1-1720]%500"
 #BSUB -q short
 #BSUB -W 8:00
 #BSUB -n 8
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=16000]"
+#BSUB -R "rusage[mem=1600]"
 #BSUB -oo /pi/summer.thyme-umw/enamine_90b_library/full_library_test/logs/similarity_%I.out
 #BSUB -eo /pi/summer.thyme-umw/enamine_90b_library/full_library_test/logs/similarity_%I.err
 
@@ -20,11 +20,11 @@ MANIFEST="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity
 
 SCRIPT="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/search_enamine_similarity_worker.py"
 
-QUERY_SMILES='c1(cc2COCC(=O)Nc2cc1)c1cccc2c1cn[nH]2'
+QUERY_SMILES='O=C1NC(=S)NC(=O)C1=CC1=CC=NC=C1'
 
 TOP_K=1000000
 
-TASK_COUNT=64
+TASK_COUNT=1720
 
 WORKERS=8
 
@@ -34,7 +34,7 @@ BATCH_SIZE=50000
 # Persistent output.
 #
 # These files MUST survive after an LSF job ends.
-RESULT_DIR="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/similarity_results/query_01/shards"
+RESULT_DIR="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/similarity_results/Z276355098/shards"
 
 
 # Temporary node-local work.
@@ -47,7 +47,6 @@ echo "LSB_JOBINDEX=$LSB_JOBINDEX"
 ###############################################################################
 
 SCRATCH_SIZE_GB="${SCRATCH_SIZE_GB:-10}"
-
 
 ###############################################################################
 # DETERMINE SCRATCH DIRECTORY
@@ -89,7 +88,7 @@ echo "Top K:           ${TOP_K}"
 echo "Batch size:      ${BATCH_SIZE}"
 echo "============================================================"
 
-#for now, using hard-coded min tanimoto of 0.6
+
 python "$SCRIPT" \
     --manifest "$MANIFEST" \
     --query-smiles "$QUERY_SMILES" \
