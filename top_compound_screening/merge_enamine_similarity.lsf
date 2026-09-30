@@ -1,0 +1,125 @@
+#!/bin/bash
+
+#BSUB -J "enamine_similarity_merge"
+#BSUB -q short
+#BSUB -W 8:00
+#BSUB -n 8
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=1600]"
+#BSUB -oo /pi/summer.thyme-umw/enamine_90b_library/full_library_test/logs/similarity_merge_%J.out
+#BSUB -eo /pi/summer.thyme-umw/enamine_90b_library/full_library_test/logs/similarity_merge_%J.err
+
+set -euo pipefail
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+MANIFEST="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/enamine_90b_manifest.txt"
+
+SCRIPT="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/merge_enamine_similarity_results.py"
+
+QUERY_SMILES='N([C@@H]1CCCCN(C(=O)[C@@H](C(C)C)O)C1)C(=O)c1cc2cc(Cl)ccc2o1'
+
+TOP_K=1000000
+
+TASK_COUNT=1720
+
+WORKERS=8
+
+BATCH_SIZE=50000
+
+#results files to write
+LOCATOR_OUTPUT_TSV_FILE="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/PV-000517439336_top_1m.tsv"
+PIPELINE_OUTPUT_CSV_FILE="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/PV-000517439336_top_1m_pipeline.csv"
+
+# Persistent output.
+#
+# These files MUST survive after an LSF job ends. This is the shards results from the initial run
+RESULT_DIR="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/similarity_results/PV-000517439336/shards"
+
+
+# Temporary node-local work.
+#WORK_DIR="/scratch/${USER}/enamine_similarity_${LSB_JOBID}"
+#test print of the job index
+echo "LSB_JOBINDEX=$LSB_JOBINDEX"
+
+###############################################################################
+# CONFIGURATION
+###############################################################################
+
+SCRATCH_SIZE_GB="${SCRATCH_SIZE_GB:-10}"
+
+
+###############################################################################
+# DETERMINE SCRATCH DIRECTORY
+###############################################################################
+
+if [ -z "${WORK_DIR:-}" ]; then
+    if [ -n "${LSB_JOBINDEX:-}" ]; then
+        WORK_DIR="/tmp/${USER}/${LSB_JOBID}_${LSB_JOBINDEX}.scratch"
+    else
+        WORK_DIR="/tmp/${USER}/${LSB_JOBID}.scratch"
+    fi
+fi
+
+# ============================================================
+# Environment
+# ============================================================
+
+# Modify for your RDKit environment if needed:
+#
+# source ~/miniconda3/etc/profile.d/conda.sh
+# conda activate rdkit
+
+
+mkdir -p "$RESULT_DIR"
+mkdir -p "$WORK_DIR"
+
+
+echo "============================================================"
+echo "Enamine distributed similarity search"
+echo "============================================================"
+echo "LSF Job ID:      ${LSB_JOBID}"
+echo "LSF array index: ${LSB_JOBINDEX}"
+echo "Host:            $(hostname)"
+echo "Allocated CPUs:  ${LSB_DJOB_NUMPROC:-unknown}"
+echo
+echo "Task count:      ${TASK_COUNT}"
+echo "Workers/job:     ${WORKERS}"
+echo "Top K:           ${TOP_K}"
+echo "Batch size:      ${BATCH_SIZE}"
+echo "============================================================"
+
+#python "$SCRIPT" \
+#    --manifest "$MANIFEST" \
+#    --query-smiles "$QUERY_SMILES" \
+#    --top-k "$TOP_K" \
+#    --min-tanimoto 0.6 \
+#    --task-count "$TASK_COUNT" \
+#    --workers "$WORKERS" \
+#    --batch-size "$BATCH_SIZE" \
+#    --header-lines 1 \
+#    --radius 2 \
+#    --fp-size 2048 \
+#    --work-dir "$WORK_DIR" \
+#    --output-dir "$RESULT_DIR"
+
+python "$SCRIPT" \
+    --manifest "$MANIFEST" \
+    --result-dir "$RESULT_DIR" \
+    --task-count "$TASK_COUNT" \
+    --top-k "$TOP_K" \
+    --locator-output "$LOCATOR_OUTPUT_TSV_FILE" \
+    --pipeline-output "$PIPELINE_OUTPUT_CSV_FILE" \
+    --recovery-work-dir "$WORK_DIR" \
+    --recovery-workers "$WORKERS"
+
+
+echo
+echo "Similarity shard completed successfully."
+
+
+# Cleanup node-local scratch.
+rm -rf "$WORK_DIR"
