@@ -1,0 +1,2 @@
+#example command to make the manixest of cxsmile bz2 files
+find . -type f -name '*.cxsmiles.bz2' | sort > S_cxsmiles_manifest.txt
