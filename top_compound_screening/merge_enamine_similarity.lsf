@@ -26,8 +26,6 @@ TASK_COUNT=1720
 
 WORKERS=8
 
-BATCH_SIZE=50000
-
 #results files to write
 LOCATOR_OUTPUT_TSV_FILE="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/PV-000517439336_top_1m.tsv"
 PIPELINE_OUTPUT_CSV_FILE="/pi/summer.thyme-umw/enamine_90b_library/full_library_test/PV-000517439336_top_1m_pipeline.csv"
