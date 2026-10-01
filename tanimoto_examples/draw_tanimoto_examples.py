@@ -230,7 +230,7 @@ def render_molecule_image(smiles, ref_mol=None, size=(MOL_W, MOL_H), align=True)
     opts.padding = 0.15
 
     # Optional cosmetic tweaks
-    opts.clearBackground = False
+    opts.clearBackground = True
     opts.addStereoAnnotation = False
 
     rdMolDraw2D.PrepareAndDrawMolecule(drawer, mol)
