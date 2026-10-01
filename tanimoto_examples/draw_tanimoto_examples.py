@@ -226,11 +226,16 @@ def render_molecule_image(smiles, ref_mol=None, size=(MOL_W, MOL_H), align=True)
     drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
     opts = drawer.drawOptions()
 
-    # More padding so longer molecules feel “zoomed out”
+    # More padding so longer molecules feel more zoomed out
     opts.padding = 0.15
 
-    # Optional cosmetic tweaks
+    # White background
     opts.clearBackground = True
+    try:
+        opts.setBackgroundColour((1, 1, 1))
+    except Exception:
+        pass
+
     opts.addStereoAnnotation = False
 
     rdMolDraw2D.PrepareAndDrawMolecule(drawer, mol)
