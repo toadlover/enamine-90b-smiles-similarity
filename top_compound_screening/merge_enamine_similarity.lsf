@@ -20,8 +20,6 @@ MANIFEST="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity
 
 SCRIPT="/pi/summer.thyme-umw/enamine_90b_library/enamine-90b-smiles-similarity/top_compound_screening/merge_enamine_similarity_results.py"
 
-QUERY_SMILES='N([C@@H]1CCCCN(C(=O)[C@@H](C(C)C)O)C1)C(=O)c1cc2cc(Cl)ccc2o1'
-
 TOP_K=1000000
 
 TASK_COUNT=1720
