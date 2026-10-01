@@ -229,10 +229,11 @@ def render_molecule_image(smiles, ref_mol=None, size=(MOL_W, MOL_H), align=True)
     # More padding so longer molecules feel more zoomed out
     opts.padding = 0.15
 
-    # White background
+    # Ask RDKit for a white background
     opts.clearBackground = True
+
     try:
-        opts.setBackgroundColour((1, 1, 1))
+        opts.setBackgroundColour((1.0, 1.0, 1.0))
     except Exception:
         pass
 
@@ -242,7 +243,26 @@ def render_molecule_image(smiles, ref_mol=None, size=(MOL_W, MOL_H), align=True)
     drawer.FinishDrawing()
 
     png = drawer.GetDrawingText()
-    return Image.open(BytesIO(png)).convert("RGB")
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Explicitly composite the RDKit image onto white.
+    #
+    # Direct RGBA -> RGB conversion can turn transparent
+    # background pixels black.
+    # --------------------------------------------------------
+
+    rdkit_img = Image.open(BytesIO(png)).convert("RGBA")
+
+    white_background = Image.new(
+        "RGBA",
+        rdkit_img.size,
+        (255, 255, 255, 255)
+    )
+
+    white_background.alpha_composite(rdkit_img)
+
+    return white_background.convert("RGB")
 
 
 # ============================================================
