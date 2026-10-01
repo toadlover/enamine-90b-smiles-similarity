@@ -20,10 +20,14 @@ QUERY_SMILES = "CN1C(=O)C=CC=C1C(=O)NC2CCCCN(C2)C(=O)CC3(C)CCCCC3"
 
 # lower inclusive, upper exclusive
 BRACKETS = [
-    (0.90, 1.00),
-    (0.80, 0.90),
-    (0.70, 0.80),
-    (0.60, 0.70),
+    (0.95, 1.00),
+    (0.90, 0.95),
+    (0.85, 0.90),
+    (0.80, 0.85),
+    (0.75, 0.80),
+    (0.70, 0.75),
+    (0.65, 0.70),
+    (0.60, 0.65),
 ]
 
 N_PER_BRACKET = 5
@@ -163,10 +167,8 @@ def align_mol_to_reference(mol, ref_mol):
     rdDepictor.SetPreferCoordGen(True)
 
     try:
-        # Start with ordinary 2D coords
         rdDepictor.Compute2DCoords(mol)
 
-        # Find maximum common substructure
         mcs = rdFMCS.FindMCS(
             [ref_mol, mol],
             timeout=5,
@@ -185,7 +187,6 @@ def align_mol_to_reference(mol, ref_mol):
         ref_match = ref_mol.GetSubstructMatch(patt)
         mol_match = mol.GetSubstructMatch(patt)
 
-        # Need at least a few atoms to make orientation meaningful
         if len(ref_match) < 3 or len(mol_match) < 3:
             return mol
 
@@ -200,7 +201,6 @@ def align_mol_to_reference(mol, ref_mol):
         return mol
 
     except Exception:
-        # Fall back silently
         try:
             rdDepictor.Compute2DCoords(mol)
         except Exception:
@@ -231,7 +231,6 @@ def render_molecule_image(smiles, ref_mol=None, size=(MOL_W, MOL_H), align=True)
 
     # Ask RDKit for a white background
     opts.clearBackground = True
-
     try:
         opts.setBackgroundColour((1.0, 1.0, 1.0))
     except Exception:
@@ -244,25 +243,20 @@ def render_molecule_image(smiles, ref_mol=None, size=(MOL_W, MOL_H), align=True)
 
     png = drawer.GetDrawingText()
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Explicitly composite the RDKit image onto white.
-    #
-    # Direct RGBA -> RGB conversion can turn transparent
-    # background pixels black.
-    # --------------------------------------------------------
-
+    # Explicitly composite onto white to avoid black backgrounds
     rdkit_img = Image.open(BytesIO(png)).convert("RGBA")
-
-    white_background = Image.new(
-        "RGBA",
-        rdkit_img.size,
-        (255, 255, 255, 255)
-    )
-
+    white_background = Image.new("RGBA", rdkit_img.size, (255, 255, 255, 255))
     white_background.alpha_composite(rdkit_img)
 
     return white_background.convert("RGB")
+
+
+def draw_placeholder(canvas, x, y):
+    """
+    Draw a black placeholder when a bracket has fewer than 5 compounds.
+    """
+    placeholder = Image.new("RGB", (MOL_W, MOL_H), "black")
+    canvas.paste(placeholder, (x, y))
 
 
 # ============================================================
@@ -294,17 +288,35 @@ def sample_by_brackets(df, brackets, n_per_bracket=5, seed=42):
     selected_groups = []
 
     for low, high in brackets:
-        subset = df[(df["tanimoto"] >= low) & (df["tanimoto"] < high)].copy()
+        subset = df[
+            (df["tanimoto"] >= low) &
+            (df["tanimoto"] < high)
+        ].copy()
 
         print(f"{low:.2f}-{high:.2f}: {len(subset):,} available")
 
-        if len(subset) == 0:
-            continue
+        if len(subset) > 0:
+            n_pick = min(n_per_bracket, len(subset))
 
-        n_pick = min(n_per_bracket, len(subset))
-        picked = subset.sample(n=n_pick, random_state=rng.randint(0, 2**32 - 1))
+            picked = subset.sample(
+                n=n_pick,
+                random_state=rng.randint(0, 2**32 - 1)
+            )
 
-        selected_groups.append((f"{low:.2f} – <{high:.2f}", picked.reset_index(drop=True)))
+            # Sort displayed compounds by descending tanimoto
+            picked = picked.sort_values(
+                "tanimoto",
+                ascending=False
+            ).reset_index(drop=True)
+        else:
+            picked = pd.DataFrame(columns=df.columns)
+
+        selected_groups.append(
+            (
+                f"{low:.2f} – <{high:.2f}",
+                picked
+            )
+        )
 
     return selected_groups
 
@@ -346,7 +358,7 @@ def draw_cell(canvas, draw, x, y, row):
 
     text_x = x + 5
 
-    # Ligand name (wrapped)
+    # Ligand name
     name_y = y + MOL_H + 6
     name_h = draw_wrapped_text(
         draw,
@@ -435,10 +447,15 @@ def make_figure(selected_groups, output_png):
             fill="black"
         )
 
-        # draw each cell
-        for col_idx, (_, row) in enumerate(group_df.iterrows()):
+        # always draw 5 cells
+        for col_idx in range(N_PER_BRACKET):
             x = LEFT_MARGIN + ROW_LABEL_W + col_idx * (CELL_W + GAP_X)
-            draw_cell(canvas, draw, x, row_top, row)
+
+            if col_idx < len(group_df):
+                row = group_df.iloc[col_idx]
+                draw_cell(canvas, draw, x, row_top, row)
+            else:
+                draw_placeholder(canvas, x, row_top)
 
         current_y += ROW_H
 
